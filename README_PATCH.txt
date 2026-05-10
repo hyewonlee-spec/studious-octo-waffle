@@ -1,12 +1,14 @@
-Arcane Binder — View saved deck list patch
+Arcane Binder camera scan patch
 
-Replace these files in your GitHub repo:
+Replace these files:
+- /src/App.tsx
+- /src/styles.css
+- /package.json
 
-/src/App.tsx
-/src/styles.css
+What changed:
+- Adds Add Card > Camera scan.
+- Lets phone users capture/upload a card photo.
+- Runs browser OCR using tesseract.js.
+- Suggests possible card names, searches Scryfall, lets you select exact printing, then saves to Notion using the existing card save flow.
 
-This patch adds a View button to saved Notion deck lists.
-You can open a saved deck list, read the full deck text, copy it, and close the modal.
-
-No Notion database changes are required.
-No Vercel environment variable changes are required.
+After replacing package.json, redeploy through Vercel. Vercel will install the new tesseract.js dependency during build.

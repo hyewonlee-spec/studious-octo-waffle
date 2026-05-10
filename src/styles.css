@@ -842,3 +842,117 @@ hr {
   }
 }
 
+
+/* ========================================================================== 
+   Phone camera card scan
+   ========================================================================== */
+.camera-scan-panel {
+  display: grid;
+  gap: 1rem;
+}
+
+.camera-help-card,
+.camera-action-card,
+.camera-candidates,
+.camera-match-results,
+.ocr-raw-details {
+  border: 1px solid var(--line);
+  border-radius: 1.25rem;
+  padding: 1rem;
+  background: #fffdf8;
+}
+
+.camera-help-card {
+  display: grid;
+  gap: 0.35rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.camera-help-card strong {
+  color: var(--ink);
+  font-size: 1rem;
+}
+
+.camera-upload-box {
+  border: 1px dashed var(--line);
+  border-radius: 1.2rem;
+  padding: 1rem;
+  background: rgba(36, 26, 20, 0.04);
+}
+
+.camera-upload-box input {
+  margin-top: 0.55rem;
+}
+
+.camera-preview-grid {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.45fr) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: stretch;
+}
+
+.camera-preview-card {
+  display: grid;
+  gap: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 1.25rem;
+  padding: 0.75rem;
+  background: #fffdf8;
+}
+
+.camera-preview-card img {
+  width: 100%;
+  max-height: 310px;
+  object-fit: contain;
+  border-radius: 1rem;
+  background: rgba(36, 26, 20, 0.05);
+}
+
+.camera-preview-card span {
+  color: var(--muted);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.candidate-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.candidate-chip {
+  width: auto;
+  border: 1px solid var(--line);
+  background: rgba(36, 26, 20, 0.06);
+  color: var(--ink);
+}
+
+.candidate-chip.active {
+  background: var(--ink);
+  color: #fff8ee;
+}
+
+.ocr-raw-details summary {
+  cursor: pointer;
+  color: var(--ink);
+  font-weight: 900;
+}
+
+.ocr-raw-details pre {
+  overflow: auto;
+  max-height: 240px;
+  margin-top: 0.75rem;
+  border-radius: 1rem;
+  padding: 0.85rem;
+  background: rgba(36, 26, 20, 0.06);
+  white-space: pre-wrap;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+@media (max-width: 680px) {
+  .camera-preview-grid {
+    grid-template-columns: 1fr;
+  }
+}

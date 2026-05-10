@@ -28,6 +28,8 @@ type MatchedCardImport = ParsedCardImport & {
 
 type ImportFoilMode = 'nonfoil' | 'foil';
 
+type AddMode = 'single' | 'bulk' | 'camera';
+
 const languageOptions = [
   'English',
   'Japanese',
@@ -240,6 +242,127 @@ function makeImportNote(existingNote: string, originalLine: string) {
   const importStamp = `Imported from text list: ${originalLine}`;
   return existingNote.trim() ? `${existingNote.trim()}\n${importStamp}` : importStamp;
 }
+
+
+function cleanCameraOcrLine(line: string) {
+  return line
+    .replace(/[{}()[\]<>]/g, ' ')
+    .replace(/[|_~`“”]/g, ' ')
+    .replace(/[^A-Za-z0-9,'’\-/:.\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function looksLikeNonTitleLine(line: string) {
+  const lower = line.toLowerCase();
+  if (line.length < 3 || line.length > 70) return true;
+  if (/^\d+$/.test(line)) return true;
+  if (/^\d+\s*\/\s*\d+$/.test(line)) return true;
+  if (/^(common|uncommon|rare|mythic|legendary|basic|token)$/i.test(line)) return true;
+  if (/\b(instant|sorcery|creature|artifact|enchantment|planeswalker|battle|land)\b\s*[—-]/i.test(line)) return true;
+  if (/\b(illus|illustrated|wizards|coast|copyright|collector|number|power|toughness)\b/i.test(lower)) return true;
+  if ((line.match(/\d/g) || []).length > Math.max(2, line.length / 3)) return true;
+  return false;
+}
+
+function extractCameraCardCandidates(rawText: string) {
+  const unique = new Set<string>();
+  const candidates: string[] = [];
+
+  rawText.split(/\r?\n/).forEach((line) => {
+    const cleaned = cleanCameraOcrLine(line);
+    if (!cleaned || looksLikeNonTitleLine(cleaned)) return;
+    const key = cleaned.toLowerCase();
+    if (unique.has(key)) return;
+    unique.add(key);
+    candidates.push(cleaned);
+  });
+
+  return candidates.slice(0, 8);
+}
+
+function loadImageFromFile(file: File): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    const url = URL.createObjectURL(file);
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('The image could not be loaded.'));
+    };
+    image.src = url;
+  });
+}
+
+async function prepareCardTitleImageForOcr(file: File) {
+  const image = await loadImageFromFile(file);
+  const canvas = document.createElement('canvas');
+  const sourceWidth = image.naturalWidth || image.width;
+  const sourceHeight = image.naturalHeight || image.height;
+  const cropY = Math.floor(sourceHeight * 0.06);
+  const cropHeight = Math.floor(sourceHeight * 0.24);
+  const scale = Math.max(2, 1400 / Math.max(1, sourceWidth));
+
+  canvas.width = Math.floor(sourceWidth * scale);
+  canvas.height = Math.floor(cropHeight * scale);
+
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('Image processing is not available in this browser.');
+
+  context.drawImage(image, 0, cropY, sourceWidth, cropHeight, 0, 0, canvas.width, canvas.height);
+
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+  const data = imageData.data;
+  for (let index = 0; index < data.length; index += 4) {
+    const grey = data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114;
+    const contrast = grey > 150 ? 255 : grey < 95 ? 0 : grey;
+    data[index] = contrast;
+    data[index + 1] = contrast;
+    data[index + 2] = contrast;
+  }
+  context.putImageData(imageData, 0, 0);
+
+  return canvas.toDataURL('image/png');
+}
+
+async function runCameraOcr(file: File) {
+  const { createWorker } = await import('tesseract.js');
+  const worker = await createWorker('eng');
+  try {
+    const processedImage = await prepareCardTitleImageForOcr(file);
+    const result = await worker.recognize(processedImage);
+    return result.data.text || '';
+  } finally {
+    await worker.terminate();
+  }
+}
+
+async function findCardsFromCameraCandidate(candidate: string) {
+  const exactQuery = `!"${escapeScryfallExactName(candidate)}"`;
+
+  try {
+    const exactMatches = await searchScryfallCards(exactQuery);
+    if (exactMatches.length > 0) return exactMatches;
+  } catch {
+    // Fall back to Scryfall fuzzy name lookup below.
+  }
+
+  const fuzzyUrl = `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(candidate)}`;
+  const fuzzyResponse = await fetch(fuzzyUrl);
+  const fuzzyData = await fuzzyResponse.json().catch(() => ({}));
+
+  if (!fuzzyResponse.ok || !fuzzyData.name) {
+    const searched = await searchScryfallCards(candidate);
+    return searched;
+  }
+
+  const printMatches = await searchScryfallCards(`!"${escapeScryfallExactName(fuzzyData.name)}"`);
+  return printMatches.length > 0 ? printMatches : [fuzzyData as ScryfallCard];
+}
+
 
 function makeDeckText(entries: Record<string, number>) {
   return Object.entries(entries)
@@ -559,13 +682,22 @@ function AddCardPage({
   onCardsImported: (cards: OwnedCard[]) => void;
   onNotice: (notice: Notice | null) => void;
 }) {
-  const [addMode, setAddMode] = useState<'single' | 'bulk'>('single');
+  const [addMode, setAddMode] = useState<AddMode>('single');
   const [query, setQuery] = useState('');
   const [searching, setSearching] = useState(false);
   const [results, setResults] = useState<ScryfallCard[]>([]);
   const [selectedCard, setSelectedCard] = useState<ScryfallCard | null>(null);
   const [form, setForm] = useState(initialNewCard);
   const [saving, setSaving] = useState(false);
+
+  const [cameraFile, setCameraFile] = useState<File | null>(null);
+  const [cameraImageUrl, setCameraImageUrl] = useState('');
+  const [cameraFileName, setCameraFileName] = useState('');
+  const [cameraOcrText, setCameraOcrText] = useState('');
+  const [cameraCandidates, setCameraCandidates] = useState<string[]>([]);
+  const [cameraScanning, setCameraScanning] = useState(false);
+  const [cameraSearching, setCameraSearching] = useState(false);
+  const [cameraActiveCandidate, setCameraActiveCandidate] = useState('');
 
   const [importText, setImportText] = useState('');
   const [importLanguage, setImportLanguage] = useState('English');
@@ -578,6 +710,12 @@ function AddCardPage({
   const totalQuantity = Number(form.nonfoilQuantity || 0) + Number(form.foilQuantity || 0);
   const matchedImportCount = importMatches.filter((item) => item.status === 'matched' && item.matchedCard).length;
   const failedImportCount = importMatches.filter((item) => item.status === 'not-found' || item.status === 'error').length;
+
+  useEffect(() => {
+    return () => {
+      if (cameraImageUrl) URL.revokeObjectURL(cameraImageUrl);
+    };
+  }, [cameraImageUrl]);
 
   async function submitSearch(event: FormEvent) {
     event.preventDefault();
@@ -598,6 +736,22 @@ function AddCardPage({
   function selectCard(card: ScryfallCard) {
     setSelectedCard(card);
     setForm({ ...initialNewCard, language: labelLanguage(card.lang) });
+  }
+
+  function resetCameraScan() {
+    setCameraFile(null);
+    setCameraFileName('');
+    setCameraOcrText('');
+    setCameraCandidates([]);
+    setCameraActiveCandidate('');
+    setResults([]);
+    setSelectedCard(null);
+    setForm(initialNewCard);
+    setCameraImageUrl((currentUrl) => {
+      if (currentUrl) URL.revokeObjectURL(currentUrl);
+      return '';
+    });
+    onNotice(null);
   }
 
   async function saveSelectedCard(event: FormEvent) {
@@ -638,6 +792,89 @@ function AddCardPage({
       onNotice({ type: 'error', message: apiErrorMessage(error) });
     } finally {
       setSaving(false);
+    }
+  }
+
+  function handleCameraFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      onNotice({ type: 'error', message: 'Choose an image captured from your camera.' });
+      event.target.value = '';
+      return;
+    }
+
+    setCameraFile(file);
+    setCameraFileName(file.name || 'Camera photo');
+    setCameraOcrText('');
+    setCameraCandidates([]);
+    setCameraActiveCandidate('');
+    setResults([]);
+    setSelectedCard(null);
+    setForm(initialNewCard);
+    setCameraImageUrl((currentUrl) => {
+      if (currentUrl) URL.revokeObjectURL(currentUrl);
+      return URL.createObjectURL(file);
+    });
+    onNotice({ type: 'info', message: 'Photo loaded. Tap Scan photo to read the card name.' });
+    event.target.value = '';
+  }
+
+  async function searchCameraCandidate(candidate: string) {
+    const trimmed = candidate.trim();
+    if (!trimmed) return;
+
+    setCameraSearching(true);
+    setCameraActiveCandidate(trimmed);
+    setResults([]);
+    setSelectedCard(null);
+    onNotice({ type: 'info', message: `Searching Scryfall for “${trimmed}”…` });
+
+    try {
+      const found = await findCardsFromCameraCandidate(trimmed);
+      setResults(found.slice(0, 24));
+      if (found.length > 0) {
+        selectCard(found[0]);
+        onNotice({ type: 'success', message: `Found ${found.length} possible printings. Check the selected card before saving.` });
+      } else {
+        onNotice({ type: 'error', message: 'No Scryfall match found. Try another candidate or use Single card search.' });
+      }
+    } catch (error) {
+      onNotice({ type: 'error', message: apiErrorMessage(error) });
+    } finally {
+      setCameraSearching(false);
+    }
+  }
+
+  async function scanCameraPhoto() {
+    if (!cameraFile) {
+      onNotice({ type: 'error', message: 'Capture or upload a card photo first.' });
+      return;
+    }
+
+    setCameraScanning(true);
+    setCameraOcrText('');
+    setCameraCandidates([]);
+    setResults([]);
+    setSelectedCard(null);
+    onNotice({ type: 'info', message: 'Scanning card title. Use a bright, straight photo for best results.' });
+
+    try {
+      const text = await runCameraOcr(cameraFile);
+      const candidates = extractCameraCardCandidates(text);
+      setCameraOcrText(text.trim());
+      setCameraCandidates(candidates);
+
+      if (candidates.length === 0) {
+        onNotice({ type: 'error', message: 'I could not read a clear card name. Retake the photo closer to the card title.' });
+        return;
+      }
+
+      await searchCameraCandidate(candidates[0]);
+    } catch (error) {
+      onNotice({ type: 'error', message: `Camera scan failed: ${apiErrorMessage(error)}` });
+    } finally {
+      setCameraScanning(false);
     }
   }
 
@@ -744,18 +981,66 @@ function AddCardPage({
     onNotice(null);
   }
 
+
+  function renderSelectedCardForm() {
+    if (!selectedCard) return null;
+
+    return (
+      <form className="detail-form" onSubmit={saveSelectedCard}>
+        <h3>Add {selectedCard.name}</h3>
+        <p className="muted">{selectedCard.set_name} · {selectedCard.set.toUpperCase()} #{selectedCard.collector_number}</p>
+        <div className="form-grid two">
+          <label>
+            Non-foil quantity
+            <input
+              type="number"
+              min="0"
+              value={form.nonfoilQuantity}
+              onChange={(event) => setForm({ ...form, nonfoilQuantity: Number(event.target.value) })}
+            />
+          </label>
+          <label>
+            Foil quantity
+            <input
+              type="number"
+              min="0"
+              value={form.foilQuantity}
+              onChange={(event) => setForm({ ...form, foilQuantity: Number(event.target.value) })}
+            />
+          </label>
+          <label>
+            Calculated total
+            <input value={totalQuantity} readOnly />
+          </label>
+          <label>
+            Language
+            <select value={form.language} onChange={(event) => setForm({ ...form, language: event.target.value })}>
+              {languageOptions.map((language) => <option key={language}>{language}</option>)}
+            </select>
+          </label>
+        </div>
+        <label>
+          Personal notes
+          <textarea value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} placeholder="Optional notes" />
+        </label>
+        <button disabled={saving}>{saving ? 'Saving…' : 'Save to library'}</button>
+      </form>
+    );
+  }
+
   return (
     <section className="page-card">
       <div className="section-heading">
         <div>
           <p className="eyebrow">Add card</p>
-          <h2>{addMode === 'single' ? 'Search exact printing' : 'Import from text list'}</h2>
+          <h2>{addMode === 'single' ? 'Search exact printing' : addMode === 'camera' ? 'Add using phone camera' : 'Import from text list'}</h2>
         </div>
       </div>
 
       <div className="subtab-bar" aria-label="Add card options">
         <button type="button" className={addMode === 'single' ? 'active' : ''} onClick={() => setAddMode('single')}>Single card</button>
         <button type="button" className={addMode === 'bulk' ? 'active' : ''} onClick={() => setAddMode('bulk')}>Text file import</button>
+        <button type="button" className={addMode === 'camera' ? 'active' : ''} onClick={() => setAddMode('camera')}>Camera scan</button>
       </div>
 
       {addMode === 'single' && (
@@ -779,48 +1064,100 @@ function AddCardPage({
             ))}
           </div>
 
-          {selectedCard && (
-            <form className="detail-form" onSubmit={saveSelectedCard}>
-              <h3>Add {selectedCard.name}</h3>
-              <p className="muted">{selectedCard.set_name} · {selectedCard.set.toUpperCase()} #{selectedCard.collector_number}</p>
-              <div className="form-grid two">
-                <label>
-                  Non-foil quantity
-                  <input
-                    type="number"
-                    min="0"
-                    value={form.nonfoilQuantity}
-                    onChange={(event) => setForm({ ...form, nonfoilQuantity: Number(event.target.value) })}
-                  />
-                </label>
-                <label>
-                  Foil quantity
-                  <input
-                    type="number"
-                    min="0"
-                    value={form.foilQuantity}
-                    onChange={(event) => setForm({ ...form, foilQuantity: Number(event.target.value) })}
-                  />
-                </label>
-                <label>
-                  Calculated total
-                  <input value={totalQuantity} readOnly />
-                </label>
-                <label>
-                  Language
-                  <select value={form.language} onChange={(event) => setForm({ ...form, language: event.target.value })}>
-                    {languageOptions.map((language) => <option key={language}>{language}</option>)}
-                  </select>
-                </label>
-              </div>
-              <label>
-                Personal notes
-                <textarea value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} placeholder="Optional notes" />
-              </label>
-              <button disabled={saving}>{saving ? 'Saving…' : 'Save to library'}</button>
-            </form>
-          )}
+          {renderSelectedCardForm()}
         </>
+      )}
+
+
+      {addMode === 'camera' && (
+        <div className="camera-scan-panel">
+          <div className="camera-help-card">
+            <strong>Phone camera scan</strong>
+            <span>Take a clear photo of the card, keeping the card name near the top sharp and well-lit.</span>
+            <span>The scan will suggest a card name, then you choose the exact printing before saving.</span>
+          </div>
+
+          <label className="camera-upload-box">
+            Capture or upload card photo
+            <input type="file" accept="image/*" capture="environment" onChange={handleCameraFile} />
+          </label>
+
+          {cameraImageUrl && (
+            <div className="camera-preview-grid">
+              <div className="camera-preview-card">
+                <img src={cameraImageUrl} alt="Card scan preview" />
+                <span>{cameraFileName}</span>
+              </div>
+              <div className="camera-action-card">
+                <h3>Scan this photo</h3>
+                <p className="muted">OCR works best when the card fills the frame and the title line is not blurry.</p>
+                <div className="button-row wrap">
+                  <button type="button" onClick={scanCameraPhoto} disabled={cameraScanning || cameraSearching}>
+                    {cameraScanning ? 'Scanning…' : cameraSearching ? 'Searching…' : 'Scan photo'}
+                  </button>
+                  <button type="button" className="secondary-button" onClick={resetCameraScan}>Clear photo</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {cameraCandidates.length > 0 && (
+            <div className="camera-candidates">
+              <div className="section-heading compact">
+                <div>
+                  <p className="eyebrow">Detected text</p>
+                  <h3>Possible card names</h3>
+                </div>
+              </div>
+              <div className="candidate-chip-row">
+                {cameraCandidates.map((candidate) => (
+                  <button
+                    key={candidate}
+                    type="button"
+                    className={cameraActiveCandidate === candidate ? 'candidate-chip active' : 'candidate-chip'}
+                    onClick={() => searchCameraCandidate(candidate)}
+                    disabled={cameraSearching}
+                  >
+                    {candidate}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {cameraOcrText && (
+            <details className="ocr-raw-details">
+              <summary>Show raw OCR text</summary>
+              <pre>{cameraOcrText}</pre>
+            </details>
+          )}
+
+          {results.length > 0 && (
+            <div className="camera-match-results">
+              <div className="section-heading compact">
+                <div>
+                  <p className="eyebrow">Scryfall matches</p>
+                  <h3>Choose exact printing</h3>
+                </div>
+              </div>
+              <div className="scryfall-grid">
+                {results.map((card) => (
+                  <button
+                    className={`result-card ${selectedCard?.id === card.id ? 'selected' : ''}`}
+                    key={card.id}
+                    onClick={() => selectCard(card)}
+                  >
+                    {getCardImage(card) ? <img src={getCardImage(card)} alt={card.name} /> : <div className="image-placeholder">No image</div>}
+                    <span>{card.name}</span>
+                    <small>{card.set_name} · {card.set.toUpperCase()} #{card.collector_number}</small>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {renderSelectedCardForm()}
+        </div>
       )}
 
       {addMode === 'bulk' && (
