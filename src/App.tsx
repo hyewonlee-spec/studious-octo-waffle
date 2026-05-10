@@ -297,14 +297,14 @@ function loadImageFromFile(file: File): Promise<HTMLImageElement> {
   });
 }
 
-async function prepareCardTitleImageForOcr(file: File) {
+async function prepareCameraImageForOcr(file: File, cropTopRatio: number, cropHeightRatio: number) {
   const image = await loadImageFromFile(file);
   const canvas = document.createElement('canvas');
   const sourceWidth = image.naturalWidth || image.width;
   const sourceHeight = image.naturalHeight || image.height;
-  const cropY = Math.floor(sourceHeight * 0.06);
-  const cropHeight = Math.floor(sourceHeight * 0.24);
-  const scale = Math.max(2, 1400 / Math.max(1, sourceWidth));
+  const cropY = Math.max(0, Math.floor(sourceHeight * cropTopRatio));
+  const cropHeight = Math.min(sourceHeight - cropY, Math.floor(sourceHeight * cropHeightRatio));
+  const scale = Math.max(2, 1600 / Math.max(1, sourceWidth));
 
   canvas.width = Math.floor(sourceWidth * scale);
   canvas.height = Math.floor(cropHeight * scale);
@@ -318,7 +318,7 @@ async function prepareCardTitleImageForOcr(file: File) {
   const data = imageData.data;
   for (let index = 0; index < data.length; index += 4) {
     const grey = data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114;
-    const contrast = grey > 150 ? 255 : grey < 95 ? 0 : grey;
+    const contrast = grey > 165 ? 255 : grey < 115 ? 0 : grey;
     data[index] = contrast;
     data[index + 1] = contrast;
     data[index + 2] = contrast;
@@ -332,9 +332,19 @@ async function runCameraOcr(file: File) {
   const { createWorker } = await import('tesseract.js');
   const worker = await createWorker('eng');
   try {
-    const processedImage = await prepareCardTitleImageForOcr(file);
-    const result = await worker.recognize(processedImage);
-    return result.data.text || '';
+    const titleCrop = await prepareCameraImageForOcr(file, 0.0, 0.16);
+    const upperCrop = await prepareCameraImageForOcr(file, 0.0, 0.28);
+    const widerCrop = await prepareCameraImageForOcr(file, 0.0, 0.42);
+
+    const titleResult = await worker.recognize(titleCrop);
+    const upperResult = await worker.recognize(upperCrop);
+    const widerResult = await worker.recognize(widerCrop);
+
+    return [
+      titleResult.data.text || '',
+      upperResult.data.text || '',
+      widerResult.data.text || '',
+    ].join('\n');
   } finally {
     await worker.terminate();
   }
@@ -695,6 +705,7 @@ function AddCardPage({
   const [cameraFileName, setCameraFileName] = useState('');
   const [cameraOcrText, setCameraOcrText] = useState('');
   const [cameraCandidates, setCameraCandidates] = useState<string[]>([]);
+  const [cameraManualName, setCameraManualName] = useState('');
   const [cameraScanning, setCameraScanning] = useState(false);
   const [cameraSearching, setCameraSearching] = useState(false);
   const [cameraActiveCandidate, setCameraActiveCandidate] = useState('');
@@ -743,6 +754,7 @@ function AddCardPage({
     setCameraFileName('');
     setCameraOcrText('');
     setCameraCandidates([]);
+    setCameraManualName('');
     setCameraActiveCandidate('');
     setResults([]);
     setSelectedCard(null);
@@ -808,6 +820,7 @@ function AddCardPage({
     setCameraFileName(file.name || 'Camera photo');
     setCameraOcrText('');
     setCameraCandidates([]);
+    setCameraManualName('');
     setCameraActiveCandidate('');
     setResults([]);
     setSelectedCard(null);
@@ -826,6 +839,7 @@ function AddCardPage({
 
     setCameraSearching(true);
     setCameraActiveCandidate(trimmed);
+    setCameraManualName(trimmed);
     setResults([]);
     setSelectedCard(null);
     onNotice({ type: 'info', message: `Searching Scryfall for “${trimmed}”…` });
@@ -855,6 +869,7 @@ function AddCardPage({
     setCameraScanning(true);
     setCameraOcrText('');
     setCameraCandidates([]);
+    setCameraManualName('');
     setResults([]);
     setSelectedCard(null);
     onNotice({ type: 'info', message: 'Scanning card title. Use a bright, straight photo for best results.' });
@@ -864,9 +879,10 @@ function AddCardPage({
       const candidates = extractCameraCardCandidates(text);
       setCameraOcrText(text.trim());
       setCameraCandidates(candidates);
+      setCameraManualName(candidates[0] || '');
 
       if (candidates.length === 0) {
-        onNotice({ type: 'error', message: 'I could not read a clear card name. Retake the photo closer to the card title.' });
+        onNotice({ type: 'error', message: 'I could not read a clear card name. Type the card name below, or retake the photo closer to the title line.' });
         return;
       }
 
@@ -1123,6 +1139,29 @@ function AddCardPage({
                 ))}
               </div>
             </div>
+          )}
+
+          {(cameraImageUrl || cameraOcrText) && (
+            <form
+              className="camera-manual-search"
+              onSubmit={(event) => {
+                event.preventDefault();
+                searchCameraCandidate(cameraManualName);
+              }}
+            >
+              <label>
+                Correct card name
+                <input
+                  value={cameraManualName}
+                  onChange={(event) => setCameraManualName(event.target.value)}
+                  placeholder="Example: Coiling Oracle"
+                />
+              </label>
+              <button type="submit" disabled={cameraSearching || !cameraManualName.trim()}>
+                {cameraSearching ? 'Searching…' : 'Search Scryfall'}
+              </button>
+              <p className="muted">If OCR reads the wrong text, type the real card name here. The app will still show exact printings before saving.</p>
+            </form>
           )}
 
           {cameraOcrText && (

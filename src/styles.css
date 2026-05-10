@@ -854,6 +854,7 @@ hr {
 .camera-help-card,
 .camera-action-card,
 .camera-candidates,
+.camera-manual-search,
 .camera-match-results,
 .ocr-raw-details {
   border: 1px solid var(--line);
@@ -955,4 +956,14 @@ hr {
   .camera-preview-grid {
     grid-template-columns: 1fr;
   }
+}
+
+
+.camera-manual-search {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.camera-manual-search button {
+  justify-self: flex-start;
 }

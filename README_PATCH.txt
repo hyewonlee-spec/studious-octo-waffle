@@ -1,14 +1,8 @@
-Arcane Binder camera scan patch
+Camera OCR correction patch
 
-Replace these files:
+Replace:
 - /src/App.tsx
 - /src/styles.css
-- /package.json
+- /package.json only if your repo does not already include tesseract.js
 
-What changed:
-- Adds Add Card > Camera scan.
-- Lets phone users capture/upload a card photo.
-- Runs browser OCR using tesseract.js.
-- Suggests possible card names, searches Scryfall, lets you select exact printing, then saves to Notion using the existing card save flow.
-
-After replacing package.json, redeploy through Vercel. Vercel will install the new tesseract.js dependency during build.
+This patch adds a manual correction field to Camera scan. If OCR reads the wrong text, type the card name (for example, Coiling Oracle) and search Scryfall. It also scans multiple top crops of the photo to improve title detection.
