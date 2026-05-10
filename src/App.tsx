@@ -257,6 +257,15 @@ function uniqueValues(cards: OwnedCard[], getter: (card: OwnedCard) => string) {
   return Array.from(new Set(cards.map(getter).filter(Boolean))).sort((a, b) => a.localeCompare(b));
 }
 
+function getOwnedCardTotal(card: Pick<OwnedCard, 'foilQuantity' | 'nonfoilQuantity' | 'totalQuantity'>) {
+  const foilQuantity = Math.max(0, Number(card.foilQuantity || 0));
+  const nonfoilQuantity = Math.max(0, Number(card.nonfoilQuantity || 0));
+  const splitTotal = foilQuantity + nonfoilQuantity;
+  const storedTotal = Math.max(0, Number(card.totalQuantity || 0));
+
+  return splitTotal > 0 ? splitTotal : storedTotal;
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('library');
   const [cards, setCards] = useState<OwnedCard[]>([]);
@@ -299,7 +308,7 @@ export default function App() {
     loadDecks();
   }, []);
 
-  const totalOwned = cards.reduce((sum, card) => sum + card.totalQuantity, 0);
+  const totalOwned = cards.reduce((sum, card) => sum + getOwnedCardTotal(card), 0);
   const totalUnique = cards.length;
 
   return (
@@ -424,9 +433,9 @@ function LibraryPage({
     const matchesLanguage = languageFilter === 'All' || card.language === languageFilter;
     const matchesQuantity =
       quantityFilter === 'All' ||
-      (quantityFilter === '1' && card.totalQuantity === 1) ||
-      (quantityFilter === '2+' && card.totalQuantity >= 2) ||
-      (quantityFilter === '4+' && card.totalQuantity >= 4);
+      (quantityFilter === '1' && getOwnedCardTotal(card) === 1) ||
+      (quantityFilter === '2+' && getOwnedCardTotal(card) >= 2) ||
+      (quantityFilter === '4+' && getOwnedCardTotal(card) >= 4);
 
     return matchesSearch && matchesSet && matchesFoil && matchesLanguage && matchesQuantity;
   });
@@ -510,7 +519,7 @@ function LibraryPage({
               <h3>{card.name}</h3>
               <p>{card.setName} · {card.setCode} #{card.collectorNumber}</p>
               <div className="pill-row">
-                <span>{card.totalQuantity} total</span>
+                <span>{getOwnedCardTotal(card)} total</span>
                 <span>{card.foilQuantity} foil</span>
                 <span>{card.nonfoilQuantity} non-foil</span>
                 <span>{card.language}</span>
@@ -608,7 +617,6 @@ function AddCardPage({
         setCode: selectedCard.set,
         collectorNumber: selectedCard.collector_number,
         imageUrl: getCardImage(selectedCard),
-        totalQuantity,
         foilQuantity: Number(form.foilQuantity || 0),
         nonfoilQuantity: Number(form.nonfoilQuantity || 0),
         language: form.language,
@@ -702,7 +710,6 @@ function AddCardPage({
           setCode: matchedCard.set,
           collectorNumber: matchedCard.collector_number,
           imageUrl: getCardImage(matchedCard),
-          totalQuantity: item.quantity,
           foilQuantity: saveAsFoil ? item.quantity : 0,
           nonfoilQuantity: saveAsFoil ? 0 : item.quantity,
           language: importLanguage,
@@ -796,7 +803,7 @@ function AddCardPage({
                   />
                 </label>
                 <label>
-                  Total quantity
+                  Calculated total
                   <input value={totalQuantity} readOnly />
                 </label>
                 <label>
@@ -946,7 +953,6 @@ function EditCardModal({
     try {
       const payload = {
         ...card,
-        totalQuantity,
         foilQuantity: Number(form.foilQuantity || 0),
         nonfoilQuantity: Number(form.nonfoilQuantity || 0),
         language: form.language,
@@ -997,7 +1003,7 @@ function EditCardModal({
             />
           </label>
           <label>
-            Total quantity
+            Calculated total
             <input value={totalQuantity} readOnly />
           </label>
           <label>
@@ -1042,7 +1048,7 @@ function DeckBuilderPage({
 
   const ownedByName = useMemo(() => {
     const map = new Map<string, number>();
-    cards.forEach((card) => map.set(card.name, (map.get(card.name) || 0) + card.totalQuantity));
+    cards.forEach((card) => map.set(card.name, (map.get(card.name) || 0) + getOwnedCardTotal(card)));
     return Array.from(map.entries())
       .map(([name, quantity]) => ({ name, quantity }))
       .sort((a, b) => a.name.localeCompare(b.name));

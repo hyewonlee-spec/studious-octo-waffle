@@ -19,8 +19,24 @@ import {
   urlProperty,
 } from './_notion.js';
 
+
+function getNumberOrFormula(prop) {
+  if (typeof prop?.number === 'number') return prop.number;
+  if (typeof prop?.formula?.number === 'number') return prop.formula.number;
+  return 0;
+}
+
+function normaliseQuantity(value) {
+  const quantity = Number(value || 0);
+  return Number.isFinite(quantity) && quantity > 0 ? quantity : 0;
+}
+
 function toOwnedCard(page) {
   const props = page.properties || {};
+  const foilQuantity = normaliseQuantity(getNumber(props['Foil Quantity']));
+  const nonfoilQuantity = normaliseQuantity(getNumber(props['Non-Foil Quantity']));
+  const splitTotal = foilQuantity + nonfoilQuantity;
+  const storedTotal = normaliseQuantity(getNumberOrFormula(props['Total Quantity']));
 
   return {
     pageId: page.id,
@@ -31,9 +47,9 @@ function toOwnedCard(page) {
     setCode: getRichText(props['Set Code']),
     collectorNumber: getRichText(props['Collector Number']),
     imageUrl: getUrl(props['Image URL']),
-    totalQuantity: getNumber(props['Total Quantity']),
-    foilQuantity: getNumber(props['Foil Quantity']),
-    nonfoilQuantity: getNumber(props['Non-Foil Quantity']),
+    totalQuantity: splitTotal > 0 ? splitTotal : storedTotal,
+    foilQuantity,
+    nonfoilQuantity,
     language: getSelect(props.Language),
     notes: getRichText(props.Notes),
     addedAt: getDate(props['Added At']),
@@ -43,10 +59,11 @@ function toOwnedCard(page) {
 
 function ownedCardProperties(card, existingAddedAt) {
   const now = new Date().toISOString();
-  const foilQuantity = Math.max(0, Number(card.foilQuantity || 0));
-  const nonfoilQuantity = Math.max(0, Number(card.nonfoilQuantity || 0));
-  const totalQuantity = Math.max(0, Number(card.totalQuantity ?? foilQuantity + nonfoilQuantity));
+  const foilQuantity = normaliseQuantity(card.foilQuantity);
+  const nonfoilQuantity = normaliseQuantity(card.nonfoilQuantity);
 
+  // Total Quantity is intentionally not written here.
+  // It should be calculated from Foil Quantity + Non-Foil Quantity so it never becomes a separate count.
   return {
     'Card Name': titleProperty(card.name || 'Untitled card'),
     'Scryfall ID': plainTextProperty(card.scryfallId || ''),
@@ -54,7 +71,6 @@ function ownedCardProperties(card, existingAddedAt) {
     'Set Code': plainTextProperty(String(card.setCode || '').toUpperCase()),
     'Collector Number': plainTextProperty(card.collectorNumber || ''),
     'Image URL': urlProperty(card.imageUrl || ''),
-    'Total Quantity': numberProperty(totalQuantity),
     'Foil Quantity': numberProperty(foilQuantity),
     'Non-Foil Quantity': numberProperty(nonfoilQuantity),
     Language: selectProperty(card.language || 'English'),

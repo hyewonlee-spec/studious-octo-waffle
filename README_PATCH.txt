@@ -1,23 +1,20 @@
-Arcane Binder text file import patch
+Arcane Binder quantity counting fix
 
-Replace these files in your GitHub repo:
+Replace these files in your GitHub repository:
 
-1. /src/App.tsx
-2. /src/styles.css
-3. /tsconfig.json
+/src/App.tsx
+/api/cards.js
 
-What this adds:
-- Add Card now has two modes: Single card and Text file import.
-- Text file import accepts uploaded .txt/.csv files or pasted card lists.
-- Accepted examples:
-  1 Sol Ring
-  2x Counterspell
-  1 Arcane Signet [CMM] #648
-  1 Command Tower (LTC) 350 foil
-- The app parses the list, matches cards through Scryfall, previews matches, then saves matched cards to your Notion Owned Cards database.
-- Default import language and default foil/non-foil can be selected before saving.
+What changed:
+- The app now treats Total Quantity as a calculated value only.
+- Total is calculated from Foil Quantity + Non-Foil Quantity.
+- The frontend no longer sends Total Quantity as an independent value when adding/importing/editing cards.
+- The API no longer writes Total Quantity to Notion.
+- The API returns totalQuantity by deriving it from Foil Quantity + Non-Foil Quantity.
+- If an old row has no foil/non-foil split, the API can still fall back to the old Total Quantity value.
 
-Notes:
-- If the text list does not include set/collector details, the app chooses the first Scryfall print match.
-- Unmatched lines are not saved. Add those manually through Single card search.
-- Import creates new card records; it does not merge with existing Notion rows yet.
+Recommended Notion update:
+- Change Total Quantity from Number to Formula if you want to keep seeing it in Notion.
+- Formula: prop("Foil Quantity") + prop("Non-Foil Quantity")
+
+If Notion does not allow converting the existing Total Quantity property cleanly, create a new Formula property called Calculated Total instead and use the formula above.
