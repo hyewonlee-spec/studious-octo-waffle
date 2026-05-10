@@ -856,6 +856,7 @@ hr {
 .camera-candidates,
 .camera-manual-search,
 .camera-match-results,
+.camera-scan-summary,
 .ocr-raw-details {
   border: 1px solid var(--line);
   border-radius: 1.25rem;
@@ -868,6 +869,11 @@ hr {
   gap: 0.35rem;
   color: var(--muted);
   line-height: 1.5;
+}
+
+.scanner-core-card {
+  border-style: solid;
+  background: linear-gradient(180deg, #fffdf8 0%, #fff7df 100%);
 }
 
 .camera-help-card strong {
@@ -914,6 +920,17 @@ hr {
   color: var(--muted);
   font-size: 0.82rem;
   overflow-wrap: anywhere;
+}
+
+.camera-scan-summary {
+  display: grid;
+  gap: 0.35rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.camera-scan-summary strong {
+  color: var(--ink);
 }
 
 .candidate-chip-row {

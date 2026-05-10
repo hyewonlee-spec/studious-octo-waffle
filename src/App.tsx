@@ -244,25 +244,79 @@ function makeImportNote(existingNote: string, originalLine: string) {
 }
 
 
+type CameraCropSpec = {
+  label: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  pageSegMode: string;
+};
+
+type CameraOcrResult = {
+  rawText: string;
+  candidates: string[];
+  scanSummary: string;
+};
+
+const cameraCropSpecs: CameraCropSpec[] = [
+  // Most MTG titles live across the upper name bar. These crops intentionally
+  // avoid the rules box, because rules text was dominating earlier scans.
+  { label: 'title bar full width', x: 0.04, y: 0.035, width: 0.92, height: 0.105, pageSegMode: '7' },
+  { label: 'title bar left focus', x: 0.05, y: 0.035, width: 0.72, height: 0.115, pageSegMode: '7' },
+  { label: 'upper card name area', x: 0.03, y: 0.00, width: 0.94, height: 0.18, pageSegMode: '6' },
+  { label: 'upper third fallback', x: 0.02, y: 0.00, width: 0.96, height: 0.30, pageSegMode: '11' },
+];
+
 function cleanCameraOcrLine(line: string) {
   return line
     .replace(/[{}()[\]<>]/g, ' ')
     .replace(/[|_~`“”]/g, ' ')
+    .replace(/[©®™•*+=]/g, ' ')
     .replace(/[^A-Za-z0-9,'’\-/:.\s]/g, ' ')
     .replace(/\s+/g, ' ')
-    .trim();
+    .trim()
+    .replace(/^[-:.,'’\s]+|[-:.,'’\s]+$/g, '');
+}
+
+function titleCaseOcrCandidate(line: string) {
+  return line
+    .split(' ')
+    .filter(Boolean)
+    .map((word) => {
+      if (/^[IVX]+$/i.test(word)) return word.toUpperCase();
+      if (word.length <= 2) return word.toLowerCase();
+      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+    })
+    .join(' ')
+    .replace(/\bOf\b/g, 'of')
+    .replace(/\bThe\b/g, 'the')
+    .replace(/\bAnd\b/g, 'and');
 }
 
 function looksLikeNonTitleLine(line: string) {
   const lower = line.toLowerCase();
-  if (line.length < 3 || line.length > 70) return true;
+  if (line.length < 3 || line.length > 48) return true;
   if (/^\d+$/.test(line)) return true;
   if (/^\d+\s*\/\s*\d+$/.test(line)) return true;
-  if (/^(common|uncommon|rare|mythic|legendary|basic|token)$/i.test(line)) return true;
+  if (/^(common|uncommon|rare|mythic|legendary|basic|token|foil|nonfoil)$/i.test(line)) return true;
   if (/\b(instant|sorcery|creature|artifact|enchantment|planeswalker|battle|land)\b\s*[—-]/i.test(line)) return true;
-  if (/\b(illus|illustrated|wizards|coast|copyright|collector|number|power|toughness)\b/i.test(lower)) return true;
-  if ((line.match(/\d/g) || []).length > Math.max(2, line.length / 3)) return true;
+  if (/\b(when|whenever|where|reveal|draw|target|create|exile|graveyard|battlefield|library|hand|mana|counter|turn|until|enters|attacks|blocks|damage|destroy|return|sacrifice|wizards|coast|copyright|illus|collector|number)\b/i.test(lower)) return true;
+  if ((line.match(/\d/g) || []).length > Math.max(2, line.length / 4)) return true;
+  const words = line.split(/\s+/).filter(Boolean);
+  if (words.length > 6) return true;
+  if (words.length >= 2 && words.every((word) => word.length <= 2)) return true;
   return false;
+}
+
+function addCandidate(unique: Set<string>, candidates: string[], candidate: string) {
+  const cleaned = cleanCameraOcrLine(candidate);
+  if (!cleaned || looksLikeNonTitleLine(cleaned)) return;
+  const titleCased = titleCaseOcrCandidate(cleaned);
+  const key = titleCased.toLowerCase();
+  if (unique.has(key)) return;
+  unique.add(key);
+  candidates.push(titleCased);
 }
 
 function extractCameraCardCandidates(rawText: string) {
@@ -271,14 +325,19 @@ function extractCameraCardCandidates(rawText: string) {
 
   rawText.split(/\r?\n/).forEach((line) => {
     const cleaned = cleanCameraOcrLine(line);
-    if (!cleaned || looksLikeNonTitleLine(cleaned)) return;
-    const key = cleaned.toLowerCase();
-    if (unique.has(key)) return;
-    unique.add(key);
-    candidates.push(cleaned);
+    addCandidate(unique, candidates, cleaned);
+
+    // Tesseract can merge the title with mana cost or nearby text. Try shorter
+    // windows as fallbacks, but keep them conservative.
+    const words = cleaned.split(/\s+/).filter(Boolean);
+    for (let windowSize = Math.min(4, words.length); windowSize >= 2; windowSize -= 1) {
+      for (let start = 0; start + windowSize <= words.length; start += 1) {
+        addCandidate(unique, candidates, words.slice(start, start + windowSize).join(' '));
+      }
+    }
   });
 
-  return candidates.slice(0, 8);
+  return candidates.slice(0, 12);
 }
 
 function loadImageFromFile(file: File): Promise<HTMLImageElement> {
@@ -297,80 +356,133 @@ function loadImageFromFile(file: File): Promise<HTMLImageElement> {
   });
 }
 
-async function prepareCameraImageForOcr(file: File, cropTopRatio: number, cropHeightRatio: number) {
+function sharpenAndThresholdImageData(imageData: ImageData, variant: 'light' | 'dark' | 'balanced') {
+  const data = imageData.data;
+  for (let index = 0; index < data.length; index += 4) {
+    const grey = data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114;
+    const adjusted = variant === 'dark'
+      ? grey < 145 ? 0 : 255
+      : variant === 'light'
+        ? grey < 185 ? 0 : 255
+        : grey > 170 ? 255 : grey < 105 ? 0 : Math.round((grey - 105) * 255 / 65);
+    data[index] = adjusted;
+    data[index + 1] = adjusted;
+    data[index + 2] = adjusted;
+  }
+  return imageData;
+}
+
+async function prepareCameraImageForOcr(
+  file: File,
+  crop: CameraCropSpec,
+  variant: 'light' | 'dark' | 'balanced',
+) {
   const image = await loadImageFromFile(file);
   const canvas = document.createElement('canvas');
   const sourceWidth = image.naturalWidth || image.width;
   const sourceHeight = image.naturalHeight || image.height;
-  const cropY = Math.max(0, Math.floor(sourceHeight * cropTopRatio));
-  const cropHeight = Math.min(sourceHeight - cropY, Math.floor(sourceHeight * cropHeightRatio));
-  const scale = Math.max(2, 1600 / Math.max(1, sourceWidth));
 
-  canvas.width = Math.floor(sourceWidth * scale);
+  const cropX = Math.max(0, Math.floor(sourceWidth * crop.x));
+  const cropY = Math.max(0, Math.floor(sourceHeight * crop.y));
+  const cropWidth = Math.min(sourceWidth - cropX, Math.floor(sourceWidth * crop.width));
+  const cropHeight = Math.min(sourceHeight - cropY, Math.floor(sourceHeight * crop.height));
+  const targetWidth = Math.max(1400, cropWidth * 3);
+  const scale = targetWidth / Math.max(1, cropWidth);
+
+  canvas.width = Math.floor(cropWidth * scale);
   canvas.height = Math.floor(cropHeight * scale);
 
-  const context = canvas.getContext('2d');
+  const context = canvas.getContext('2d', { willReadFrequently: true });
   if (!context) throw new Error('Image processing is not available in this browser.');
 
-  context.drawImage(image, 0, cropY, sourceWidth, cropHeight, 0, 0, canvas.width, canvas.height);
+  context.imageSmoothingEnabled = false;
+  context.drawImage(image, cropX, cropY, cropWidth, cropHeight, 0, 0, canvas.width, canvas.height);
 
   const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
-  const data = imageData.data;
-  for (let index = 0; index < data.length; index += 4) {
-    const grey = data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114;
-    const contrast = grey > 165 ? 255 : grey < 115 ? 0 : grey;
-    data[index] = contrast;
-    data[index + 1] = contrast;
-    data[index + 2] = contrast;
-  }
-  context.putImageData(imageData, 0, 0);
+  context.putImageData(sharpenAndThresholdImageData(imageData, variant), 0, 0);
 
   return canvas.toDataURL('image/png');
 }
 
-async function runCameraOcr(file: File) {
+async function runCameraOcr(file: File): Promise<CameraOcrResult> {
   const { createWorker } = await import('tesseract.js');
   const worker = await createWorker('eng');
+  const chunks: string[] = [];
+  let scanCount = 0;
+
   try {
-    const titleCrop = await prepareCameraImageForOcr(file, 0.0, 0.16);
-    const upperCrop = await prepareCameraImageForOcr(file, 0.0, 0.28);
-    const widerCrop = await prepareCameraImageForOcr(file, 0.0, 0.42);
-
-    const titleResult = await worker.recognize(titleCrop);
-    const upperResult = await worker.recognize(upperCrop);
-    const widerResult = await worker.recognize(widerCrop);
-
-    return [
-      titleResult.data.text || '',
-      upperResult.data.text || '',
-      widerResult.data.text || '',
-    ].join('\n');
+    for (const crop of cameraCropSpecs) {
+      for (const variant of ['balanced', 'light', 'dark'] as const) {
+        await worker.setParameters({
+          tessedit_pageseg_mode: crop.pageSegMode,
+          preserve_interword_spaces: '1',
+          tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789,\'’:- ",
+        } as Record<string, string>);
+        const prepared = await prepareCameraImageForOcr(file, crop, variant);
+        const result = await worker.recognize(prepared);
+        scanCount += 1;
+        chunks.push(`[${crop.label} / ${variant}]\n${result.data.text || ''}`);
+      }
+    }
   } finally {
     await worker.terminate();
   }
+
+  const rawText = chunks.join('\n');
+  const candidates = extractCameraCardCandidates(rawText);
+  return {
+    rawText,
+    candidates,
+    scanSummary: `${scanCount} OCR passes across title-bar and upper-card crops`,
+  };
+}
+
+async function getScryfallAutocompleteNames(candidate: string) {
+  const url = `https://api.scryfall.com/cards/autocomplete?q=${encodeURIComponent(candidate)}`;
+  const response = await fetch(url);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !Array.isArray(data.data)) return [];
+  return data.data.slice(0, 8) as string[];
 }
 
 async function findCardsFromCameraCandidate(candidate: string) {
-  const exactQuery = `!"${escapeScryfallExactName(candidate)}"`;
+  const attempts: string[] = [candidate];
 
-  try {
-    const exactMatches = await searchScryfallCards(exactQuery);
-    if (exactMatches.length > 0) return exactMatches;
-  } catch {
-    // Fall back to Scryfall fuzzy name lookup below.
+  const autocompleteNames = await getScryfallAutocompleteNames(candidate).catch(() => []);
+  autocompleteNames.forEach((name) => {
+    if (!attempts.some((existing) => existing.toLowerCase() === name.toLowerCase())) attempts.push(name);
+  });
+
+  for (const attempt of attempts) {
+    const exactQuery = `!"${escapeScryfallExactName(attempt)}"`;
+    try {
+      const exactMatches = await searchScryfallCards(exactQuery);
+      if (exactMatches.length > 0) return exactMatches;
+    } catch {
+      // Continue through fuzzy and search fallbacks.
+    }
+
+    try {
+      const fuzzyUrl = `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(attempt)}`;
+      const fuzzyResponse = await fetch(fuzzyUrl);
+      const fuzzyData = await fuzzyResponse.json().catch(() => ({}));
+      if (fuzzyResponse.ok && fuzzyData.name) {
+        const printMatches = await searchScryfallCards(`!"${escapeScryfallExactName(fuzzyData.name)}"`);
+        return printMatches.length > 0 ? printMatches : [fuzzyData as ScryfallCard];
+      }
+    } catch {
+      // Try regular Scryfall search below.
+    }
+
+    try {
+      const searched = await searchScryfallCards(attempt);
+      if (searched.length > 0) return searched;
+    } catch {
+      // Move to next candidate.
+    }
   }
 
-  const fuzzyUrl = `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(candidate)}`;
-  const fuzzyResponse = await fetch(fuzzyUrl);
-  const fuzzyData = await fuzzyResponse.json().catch(() => ({}));
-
-  if (!fuzzyResponse.ok || !fuzzyData.name) {
-    const searched = await searchScryfallCards(candidate);
-    return searched;
-  }
-
-  const printMatches = await searchScryfallCards(`!"${escapeScryfallExactName(fuzzyData.name)}"`);
-  return printMatches.length > 0 ? printMatches : [fuzzyData as ScryfallCard];
+  return [] as ScryfallCard[];
 }
 
 
@@ -709,6 +821,7 @@ function AddCardPage({
   const [cameraScanning, setCameraScanning] = useState(false);
   const [cameraSearching, setCameraSearching] = useState(false);
   const [cameraActiveCandidate, setCameraActiveCandidate] = useState('');
+  const [cameraScanSummary, setCameraScanSummary] = useState('');
 
   const [importText, setImportText] = useState('');
   const [importLanguage, setImportLanguage] = useState('English');
@@ -756,6 +869,7 @@ function AddCardPage({
     setCameraCandidates([]);
     setCameraManualName('');
     setCameraActiveCandidate('');
+    setCameraScanSummary('');
     setResults([]);
     setSelectedCard(null);
     setForm(initialNewCard);
@@ -822,6 +936,7 @@ function AddCardPage({
     setCameraCandidates([]);
     setCameraManualName('');
     setCameraActiveCandidate('');
+    setCameraScanSummary('');
     setResults([]);
     setSelectedCard(null);
     setForm(initialNewCard);
@@ -870,23 +985,36 @@ function AddCardPage({
     setCameraOcrText('');
     setCameraCandidates([]);
     setCameraManualName('');
+    setCameraScanSummary('');
     setResults([]);
     setSelectedCard(null);
-    onNotice({ type: 'info', message: 'Scanning card title. Use a bright, straight photo for best results.' });
+    onNotice({ type: 'info', message: 'Scanning title-bar crops and checking Scryfall. This may take a moment.' });
 
     try {
-      const text = await runCameraOcr(cameraFile);
-      const candidates = extractCameraCardCandidates(text);
-      setCameraOcrText(text.trim());
-      setCameraCandidates(candidates);
-      setCameraManualName(candidates[0] || '');
+      const scan = await runCameraOcr(cameraFile);
+      setCameraOcrText(scan.rawText.trim());
+      setCameraCandidates(scan.candidates);
+      setCameraScanSummary(scan.scanSummary);
+      setCameraManualName(scan.candidates[0] || '');
 
-      if (candidates.length === 0) {
-        onNotice({ type: 'error', message: 'I could not read a clear card name. Type the card name below, or retake the photo closer to the title line.' });
+      if (scan.candidates.length === 0) {
+        onNotice({ type: 'error', message: 'No readable card-title candidates were found. Retake the photo with the full card straight in frame.' });
         return;
       }
 
-      await searchCameraCandidate(candidates[0]);
+      for (const candidate of scan.candidates) {
+        setCameraActiveCandidate(candidate);
+        setCameraManualName(candidate);
+        const found = await findCardsFromCameraCandidate(candidate);
+        if (found.length > 0) {
+          setResults(found.slice(0, 24));
+          selectCard(found[0]);
+          onNotice({ type: 'success', message: `Matched “${found[0].name}”. Check the exact printing before saving.` });
+          return;
+        }
+      }
+
+      onNotice({ type: 'error', message: 'The scan produced text, but none of it matched Scryfall. Try a brighter full-card photo.' });
     } catch (error) {
       onNotice({ type: 'error', message: `Camera scan failed: ${apiErrorMessage(error)}` });
     } finally {
@@ -1087,10 +1215,10 @@ function AddCardPage({
 
       {addMode === 'camera' && (
         <div className="camera-scan-panel">
-          <div className="camera-help-card">
+          <div className="camera-help-card scanner-core-card">
             <strong>Phone camera scan</strong>
-            <span>Take a clear photo of the card, keeping the card name near the top sharp and well-lit.</span>
-            <span>The scan will suggest a card name, then you choose the exact printing before saving.</span>
+            <span>This scanner now prioritises the MTG title bar, preprocesses the image, runs multiple OCR passes, then checks Scryfall fuzzy/autocomplete matches.</span>
+            <span>Best capture: one full card, straight in frame, no phone screenshot UI, title bar sharp, bright light, minimal glare.</span>
           </div>
 
           <label className="camera-upload-box">
@@ -1106,7 +1234,7 @@ function AddCardPage({
               </div>
               <div className="camera-action-card">
                 <h3>Scan this photo</h3>
-                <p className="muted">OCR works best when the card fills the frame and the title line is not blurry.</p>
+                <p className="muted">The app will run several title-bar scans and try to match the best result automatically.</p>
                 <div className="button-row wrap">
                   <button type="button" onClick={scanCameraPhoto} disabled={cameraScanning || cameraSearching}>
                     {cameraScanning ? 'Scanning…' : cameraSearching ? 'Searching…' : 'Scan photo'}
@@ -1117,12 +1245,20 @@ function AddCardPage({
             </div>
           )}
 
+          {cameraScanSummary && (
+            <div className="camera-scan-summary">
+              <strong>Scanner mechanics</strong>
+              <span>{cameraScanSummary}</span>
+              <span>Matched candidates are checked against Scryfall exact, fuzzy, autocomplete, and regular search.</span>
+            </div>
+          )}
+
           {cameraCandidates.length > 0 && (
             <div className="camera-candidates">
               <div className="section-heading compact">
                 <div>
                   <p className="eyebrow">Detected text</p>
-                  <h3>Possible card names</h3>
+                  <h3>Ranked card-name candidates</h3>
                 </div>
               </div>
               <div className="candidate-chip-row">

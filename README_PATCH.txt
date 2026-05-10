@@ -1,8 +1,20 @@
-Camera OCR correction patch
+Arcane Binder — Real Scanner Mechanics Patch
 
 Replace:
-- /src/App.tsx
-- /src/styles.css
-- /package.json only if your repo does not already include tesseract.js
+/src/App.tsx
+/src/styles.css
 
-This patch adds a manual correction field to Camera scan. If OCR reads the wrong text, type the card name (for example, Coiling Oracle) and search Scryfall. It also scans multiple top crops of the photo to improve title detection.
+Only replace /package.json if your current package.json does not already include:
+"tesseract.js": "^7.0.0"
+
+What changed:
+- Camera scan no longer treats the whole card as plain text.
+- It crops the MTG title-bar and upper-card zones.
+- It runs multiple OCR preprocessing variants.
+- It ranks card-name candidates.
+- It checks Scryfall exact, fuzzy, autocomplete, and regular search.
+- It automatically searches through multiple candidates until it finds a Scryfall match.
+
+Run:
+npm install
+npm run build
