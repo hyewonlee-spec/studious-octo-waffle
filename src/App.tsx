@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from 'react';
 import type { DeckList, OwnedCard, ScryfallCard } from './types';
 import { getCardImage, labelLanguage, searchScryfallCards } from './lib/scryfall';
 
@@ -8,6 +8,25 @@ type Notice = {
   type: 'success' | 'error' | 'info';
   message: string;
 };
+
+
+type ParsedCardImport = {
+  key: string;
+  originalLine: string;
+  name: string;
+  quantity: number;
+  setCode?: string;
+  collectorNumber?: string;
+  foilHint?: boolean;
+};
+
+type MatchedCardImport = ParsedCardImport & {
+  status: 'pending' | 'matched' | 'not-found' | 'error';
+  matchedCard?: ScryfallCard;
+  error?: string;
+};
+
+type ImportFoilMode = 'nonfoil' | 'foil';
 
 const languageOptions = [
   'English',
@@ -38,6 +57,188 @@ function apiErrorMessage(error: unknown) {
 async function readApiError(response: Response) {
   const data = await response.json().catch(() => ({}));
   return data.error || `Request failed with ${response.status}.`;
+}
+
+
+const deckListHeadings = new Set([
+  'commander',
+  'commanders',
+  'companion',
+  'creature',
+  'creatures',
+  'instant',
+  'instants',
+  'sorcery',
+  'sorceries',
+  'artifact',
+  'artifacts',
+  'enchantment',
+  'enchantments',
+  'planeswalker',
+  'planeswalkers',
+  'land',
+  'lands',
+  'sideboard',
+  'maybeboard',
+  'tokens',
+  'deck',
+  'mainboard',
+  'main deck',
+]);
+
+function normaliseImportLine(line: string) {
+  return line
+    .trim()
+    .replace(/^[-*•]\s+/, '')
+    .replace(/^SB:\s*/i, '')
+    .replace(/^Sideboard:\s*/i, '')
+    .replace(/\s+/g, ' ');
+}
+
+function isHeadingLine(line: string) {
+  const normalised = line.toLowerCase().replace(/[:\-]+$/g, '').trim();
+  return deckListHeadings.has(normalised);
+}
+
+function cleanImportedCardName(rawName: string) {
+  let working = rawName.trim();
+  const foilHint = /(?:\bfoil\b|\*f\*|\[f\])/i.test(working);
+
+  working = working
+    .replace(/\*f\*/gi, '')
+    .replace(/\[f\]/gi, '')
+    .replace(/\[foil\]/gi, '')
+    .replace(/\(foil\)/gi, '')
+    .replace(/\bfoil\b/gi, '')
+    .trim();
+
+  let setCode: string | undefined;
+  let collectorNumber: string | undefined;
+
+  const bracketMatch = working.match(/\[([A-Za-z0-9]{2,8})\](?:\s*#?([A-Za-z0-9★☆-]+))?\s*$/);
+  if (bracketMatch) {
+    setCode = bracketMatch[1].toUpperCase();
+    collectorNumber = bracketMatch[2];
+    working = working.slice(0, bracketMatch.index).trim();
+  }
+
+  const parenthesisMatch = working.match(/\(([A-Za-z0-9]{2,8})\)(?:\s*#?([A-Za-z0-9★☆-]+))?\s*$/);
+  if (!setCode && parenthesisMatch) {
+    setCode = parenthesisMatch[1].toUpperCase();
+    collectorNumber = parenthesisMatch[2];
+    working = working.slice(0, parenthesisMatch.index).trim();
+  }
+
+  working = working
+    .replace(/\s+#?[A-Za-z0-9★☆-]+\s*$/i, (match) => {
+      if (setCode || collectorNumber) return '';
+      return /^\s+#\d/.test(match) ? '' : match;
+    })
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return {
+    name: working,
+    setCode,
+    collectorNumber,
+    foilHint,
+  };
+}
+
+function parseCardListText(text: string): ParsedCardImport[] {
+  const byKey = new Map<string, ParsedCardImport>();
+
+  text.split(/\r?\n/).forEach((rawLine, index) => {
+    const originalLine = rawLine.trim();
+    const line = normaliseImportLine(rawLine);
+    if (!line || line.startsWith('#') || line.startsWith('//') || isHeadingLine(line)) return;
+
+    let quantity = 1;
+    let rawName = line;
+
+    const leadingQuantity = line.match(/^(\d+)\s*[xX]?\s+(.+)$/);
+    const trailingQuantity = line.match(/^(.+?)\s+[xX]\s*(\d+)$/i);
+
+    if (leadingQuantity) {
+      quantity = Number(leadingQuantity[1]);
+      rawName = leadingQuantity[2];
+    } else if (trailingQuantity) {
+      quantity = Number(trailingQuantity[2]);
+      rawName = trailingQuantity[1];
+    }
+
+    if (!Number.isFinite(quantity) || quantity <= 0) return;
+
+    const cleaned = cleanImportedCardName(rawName);
+    if (!cleaned.name || isHeadingLine(cleaned.name)) return;
+
+    const key = [
+      cleaned.name.toLowerCase(),
+      cleaned.setCode || '',
+      cleaned.collectorNumber || '',
+      cleaned.foilHint ? 'foil' : 'default',
+    ].join('|');
+
+    const existing = byKey.get(key);
+    if (existing) {
+      byKey.set(key, {
+        ...existing,
+        quantity: existing.quantity + quantity,
+        originalLine: `${existing.originalLine}; ${originalLine}`,
+      });
+      return;
+    }
+
+    byKey.set(key, {
+      key: `${key}|${index}`,
+      originalLine,
+      name: cleaned.name,
+      quantity,
+      setCode: cleaned.setCode,
+      collectorNumber: cleaned.collectorNumber,
+      foilHint: cleaned.foilHint,
+    });
+  });
+
+  return Array.from(byKey.values()).slice(0, 150);
+}
+
+function escapeScryfallExactName(name: string) {
+  return name.replace(/"/g, '\\"');
+}
+
+async function findScryfallCardForImport(item: ParsedCardImport) {
+  const exactName = `!"${escapeScryfallExactName(item.name)}"`;
+  const queries = item.setCode
+    ? [`${exactName} set:${item.setCode}`, `${item.name} set:${item.setCode}`, item.name]
+    : [exactName, item.name];
+
+  let lastError = 'No matching card found.';
+
+  for (const query of queries) {
+    try {
+      const results = await searchScryfallCards(query);
+      const exactMatches = results.filter((card) => card.name.toLowerCase() === item.name.toLowerCase());
+      const pool = exactMatches.length > 0 ? exactMatches : results;
+      const collectorMatch = item.collectorNumber
+        ? pool.find((card) => card.collector_number.toLowerCase() === item.collectorNumber?.toLowerCase())
+        : undefined;
+      const setMatch = item.setCode
+        ? pool.find((card) => card.set.toUpperCase() === item.setCode)
+        : undefined;
+      const matched = collectorMatch || setMatch || pool[0];
+      if (matched) return matched;
+    } catch (error) {
+      lastError = apiErrorMessage(error);
+    }
+  }
+
+  throw new Error(lastError);
+}
+
+function makeImportNote(existingNote: string, originalLine: string) {
+  const importStamp = `Imported from text list: ${originalLine}`;
+  return existingNote.trim() ? `${existingNote.trim()}\n${importStamp}` : importStamp;
 }
 
 function makeDeckText(entries: Record<string, number>) {
@@ -147,6 +348,11 @@ export default function App() {
           onCardAdded={(card) => {
             setCards((current) => [card, ...current]);
             setNotice({ type: 'success', message: `${card.name} was added to your library.` });
+            setActiveTab('library');
+          }}
+          onCardsImported={(importedCards) => {
+            setCards((current) => [...importedCards, ...current]);
+            setNotice({ type: 'success', message: `${importedCards.length} card record(s) were imported to your library.` });
             setActiveTab('library');
           }}
           onNotice={setNotice}
@@ -337,11 +543,14 @@ function LibraryPage({
 
 function AddCardPage({
   onCardAdded,
+  onCardsImported,
   onNotice,
 }: {
   onCardAdded: (card: OwnedCard) => void;
+  onCardsImported: (cards: OwnedCard[]) => void;
   onNotice: (notice: Notice | null) => void;
 }) {
+  const [addMode, setAddMode] = useState<'single' | 'bulk'>('single');
   const [query, setQuery] = useState('');
   const [searching, setSearching] = useState(false);
   const [results, setResults] = useState<ScryfallCard[]>([]);
@@ -349,7 +558,17 @@ function AddCardPage({
   const [form, setForm] = useState(initialNewCard);
   const [saving, setSaving] = useState(false);
 
+  const [importText, setImportText] = useState('');
+  const [importLanguage, setImportLanguage] = useState('English');
+  const [importFoilMode, setImportFoilMode] = useState<ImportFoilMode>('nonfoil');
+  const [importNotes, setImportNotes] = useState('');
+  const [importMatches, setImportMatches] = useState<MatchedCardImport[]>([]);
+  const [resolvingImport, setResolvingImport] = useState(false);
+  const [savingImport, setSavingImport] = useState(false);
+
   const totalQuantity = Number(form.nonfoilQuantity || 0) + Number(form.foilQuantity || 0);
+  const matchedImportCount = importMatches.filter((item) => item.status === 'matched' && item.matchedCard).length;
+  const failedImportCount = importMatches.filter((item) => item.status === 'not-found' || item.status === 'error').length;
 
   async function submitSearch(event: FormEvent) {
     event.preventDefault();
@@ -414,74 +633,287 @@ function AddCardPage({
     }
   }
 
+  async function handleImportFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const text = await file.text();
+    setImportText(text);
+    setImportMatches([]);
+    onNotice({ type: 'info', message: `${file.name} was loaded. Review the text, then parse and match.` });
+    event.target.value = '';
+  }
+
+  async function parseAndMatchImport() {
+    const parsed = parseCardListText(importText);
+    if (parsed.length === 0) {
+      onNotice({ type: 'error', message: 'No card lines were found. Use lines like "1 Sol Ring" or "2x Counterspell".' });
+      setImportMatches([]);
+      return;
+    }
+
+    setResolvingImport(true);
+    onNotice({ type: 'info', message: `Matching ${parsed.length} card line(s) with Scryfall…` });
+    const pending = parsed.map<MatchedCardImport>((item) => ({ ...item, status: 'pending' }));
+    setImportMatches(pending);
+
+    const resolved: MatchedCardImport[] = [];
+
+    for (const item of parsed) {
+      try {
+        const matchedCard = await findScryfallCardForImport(item);
+        resolved.push({ ...item, status: 'matched', matchedCard });
+      } catch (error) {
+        resolved.push({ ...item, status: 'not-found', error: apiErrorMessage(error) });
+      }
+
+      setImportMatches([
+        ...resolved,
+        ...parsed.slice(resolved.length).map<MatchedCardImport>((remaining) => ({ ...remaining, status: 'pending' })),
+      ]);
+    }
+
+    const matched = resolved.filter((item) => item.status === 'matched').length;
+    const failed = resolved.length - matched;
+    onNotice({
+      type: failed > 0 ? 'info' : 'success',
+      message: failed > 0 ? `${matched} matched. ${failed} need manual review.` : `${matched} card line(s) matched and are ready to save.`,
+    });
+    setResolvingImport(false);
+  }
+
+  async function saveMatchedImport() {
+    const matched = importMatches.filter((item) => item.status === 'matched' && item.matchedCard);
+    if (matched.length === 0) {
+      onNotice({ type: 'error', message: 'No matched cards are ready to save.' });
+      return;
+    }
+
+    setSavingImport(true);
+    const savedCards: OwnedCard[] = [];
+
+    try {
+      for (const item of matched) {
+        const matchedCard = item.matchedCard as ScryfallCard;
+        const saveAsFoil = item.foilHint || importFoilMode === 'foil';
+        const payload = {
+          scryfallId: matchedCard.id,
+          name: matchedCard.name,
+          setName: matchedCard.set_name,
+          setCode: matchedCard.set,
+          collectorNumber: matchedCard.collector_number,
+          imageUrl: getCardImage(matchedCard),
+          totalQuantity: item.quantity,
+          foilQuantity: saveAsFoil ? item.quantity : 0,
+          nonfoilQuantity: saveAsFoil ? 0 : item.quantity,
+          language: importLanguage,
+          notes: makeImportNote(importNotes, item.originalLine),
+        };
+
+        const response = await fetch('/api/cards', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!response.ok) throw new Error(await readApiError(response));
+        const data = await response.json();
+        savedCards.push(data.card);
+      }
+
+      setImportText('');
+      setImportMatches([]);
+      setImportNotes('');
+      onCardsImported(savedCards);
+    } catch (error) {
+      onNotice({ type: 'error', message: apiErrorMessage(error) });
+    } finally {
+      setSavingImport(false);
+    }
+  }
+
+  function clearImport() {
+    setImportText('');
+    setImportMatches([]);
+    setImportNotes('');
+    onNotice(null);
+  }
+
   return (
     <section className="page-card">
       <div className="section-heading">
         <div>
           <p className="eyebrow">Add card</p>
-          <h2>Search exact printing</h2>
+          <h2>{addMode === 'single' ? 'Search exact printing' : 'Import from text list'}</h2>
         </div>
       </div>
 
-      <form className="search-row" onSubmit={submitSearch}>
-        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search card name" />
-        <button disabled={searching || !query.trim()}>{searching ? 'Searching…' : 'Search'}</button>
-      </form>
-
-      <div className="scryfall-grid">
-        {results.map((card) => (
-          <button
-            className={`result-card ${selectedCard?.id === card.id ? 'selected' : ''}`}
-            key={card.id}
-            onClick={() => selectCard(card)}
-          >
-            {getCardImage(card) ? <img src={getCardImage(card)} alt={card.name} /> : <div className="image-placeholder">No image</div>}
-            <span>{card.name}</span>
-            <small>{card.set_name} · {card.set.toUpperCase()} #{card.collector_number}</small>
-          </button>
-        ))}
+      <div className="subtab-bar" aria-label="Add card options">
+        <button type="button" className={addMode === 'single' ? 'active' : ''} onClick={() => setAddMode('single')}>Single card</button>
+        <button type="button" className={addMode === 'bulk' ? 'active' : ''} onClick={() => setAddMode('bulk')}>Text file import</button>
       </div>
 
-      {selectedCard && (
-        <form className="detail-form" onSubmit={saveSelectedCard}>
-          <h3>Add {selectedCard.name}</h3>
-          <p className="muted">{selectedCard.set_name} · {selectedCard.set.toUpperCase()} #{selectedCard.collector_number}</p>
+      {addMode === 'single' && (
+        <>
+          <form className="search-row" onSubmit={submitSearch}>
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search card name" />
+            <button disabled={searching || !query.trim()}>{searching ? 'Searching…' : 'Search'}</button>
+          </form>
+
+          <div className="scryfall-grid">
+            {results.map((card) => (
+              <button
+                className={`result-card ${selectedCard?.id === card.id ? 'selected' : ''}`}
+                key={card.id}
+                onClick={() => selectCard(card)}
+              >
+                {getCardImage(card) ? <img src={getCardImage(card)} alt={card.name} /> : <div className="image-placeholder">No image</div>}
+                <span>{card.name}</span>
+                <small>{card.set_name} · {card.set.toUpperCase()} #{card.collector_number}</small>
+              </button>
+            ))}
+          </div>
+
+          {selectedCard && (
+            <form className="detail-form" onSubmit={saveSelectedCard}>
+              <h3>Add {selectedCard.name}</h3>
+              <p className="muted">{selectedCard.set_name} · {selectedCard.set.toUpperCase()} #{selectedCard.collector_number}</p>
+              <div className="form-grid two">
+                <label>
+                  Non-foil quantity
+                  <input
+                    type="number"
+                    min="0"
+                    value={form.nonfoilQuantity}
+                    onChange={(event) => setForm({ ...form, nonfoilQuantity: Number(event.target.value) })}
+                  />
+                </label>
+                <label>
+                  Foil quantity
+                  <input
+                    type="number"
+                    min="0"
+                    value={form.foilQuantity}
+                    onChange={(event) => setForm({ ...form, foilQuantity: Number(event.target.value) })}
+                  />
+                </label>
+                <label>
+                  Total quantity
+                  <input value={totalQuantity} readOnly />
+                </label>
+                <label>
+                  Language
+                  <select value={form.language} onChange={(event) => setForm({ ...form, language: event.target.value })}>
+                    {languageOptions.map((language) => <option key={language}>{language}</option>)}
+                  </select>
+                </label>
+              </div>
+              <label>
+                Personal notes
+                <textarea value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} placeholder="Optional notes" />
+              </label>
+              <button disabled={saving}>{saving ? 'Saving…' : 'Save to library'}</button>
+            </form>
+          )}
+        </>
+      )}
+
+      {addMode === 'bulk' && (
+        <div className="bulk-import-panel">
+          <div className="import-help">
+            <strong>Accepted list examples</strong>
+            <span>1 Sol Ring</span>
+            <span>2x Counterspell</span>
+            <span>1 Arcane Signet [CMM] #648</span>
+            <span>1 Command Tower (LTC) 350 foil</span>
+          </div>
+
+          <label>
+            Upload text file
+            <input type="file" accept=".txt,.csv,text/plain" onChange={handleImportFile} />
+          </label>
+
+          <label>
+            Paste card list
+            <textarea
+              className="bulk-textarea"
+              value={importText}
+              onChange={(event) => {
+                setImportText(event.target.value);
+                setImportMatches([]);
+              }}
+              placeholder={"1 Sol Ring\n1 Arcane Signet\n1 Command Tower"}
+            />
+          </label>
+
           <div className="form-grid two">
             <label>
-              Non-foil quantity
-              <input
-                type="number"
-                min="0"
-                value={form.nonfoilQuantity}
-                onChange={(event) => setForm({ ...form, nonfoilQuantity: Number(event.target.value) })}
-              />
-            </label>
-            <label>
-              Foil quantity
-              <input
-                type="number"
-                min="0"
-                value={form.foilQuantity}
-                onChange={(event) => setForm({ ...form, foilQuantity: Number(event.target.value) })}
-              />
-            </label>
-            <label>
-              Total quantity
-              <input value={totalQuantity} readOnly />
-            </label>
-            <label>
-              Language
-              <select value={form.language} onChange={(event) => setForm({ ...form, language: event.target.value })}>
+              Default language
+              <select value={importLanguage} onChange={(event) => setImportLanguage(event.target.value)}>
                 {languageOptions.map((language) => <option key={language}>{language}</option>)}
               </select>
             </label>
+            <label>
+              Default imported copies as
+              <select value={importFoilMode} onChange={(event) => setImportFoilMode(event.target.value as ImportFoilMode)}>
+                <option value="nonfoil">Non-foil</option>
+                <option value="foil">Foil</option>
+              </select>
+            </label>
           </div>
+
           <label>
-            Personal notes
-            <textarea value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} placeholder="Optional notes" />
+            Personal notes added to imported cards
+            <textarea
+              value={importNotes}
+              onChange={(event) => setImportNotes(event.target.value)}
+              placeholder="Optional note added to every imported card"
+            />
           </label>
-          <button disabled={saving}>{saving ? 'Saving…' : 'Save to library'}</button>
-        </form>
+
+          <div className="button-row wrap">
+            <button type="button" onClick={parseAndMatchImport} disabled={resolvingImport || !importText.trim()}>
+              {resolvingImport ? 'Matching…' : 'Parse and match'}
+            </button>
+            <button type="button" className="secondary-button" onClick={clearImport}>Clear</button>
+          </div>
+
+          {importMatches.length > 0 && (
+            <div className="import-preview">
+              <div className="section-heading compact">
+                <div>
+                  <p className="eyebrow">Preview</p>
+                  <h3>{matchedImportCount} matched · {failedImportCount} review</h3>
+                </div>
+                <button type="button" onClick={saveMatchedImport} disabled={savingImport || resolvingImport || matchedImportCount === 0}>
+                  {savingImport ? 'Saving…' : 'Save matched cards'}
+                </button>
+              </div>
+
+              <div className="import-preview-list">
+                {importMatches.map((item) => (
+                  <article className={`import-preview-row ${item.status}`} key={item.key}>
+                    <div>
+                      <strong>{item.quantity} {item.name}</strong>
+                      <span>{item.originalLine}</span>
+                    </div>
+                    {item.status === 'pending' && <span className="status-pill">Matching…</span>}
+                    {item.status === 'matched' && item.matchedCard && (
+                      <span className="status-pill success">
+                        {item.matchedCard.set_name} · {item.matchedCard.set.toUpperCase()} #{item.matchedCard.collector_number}
+                      </span>
+                    )}
+                    {(item.status === 'not-found' || item.status === 'error') && (
+                      <span className="status-pill error">Needs manual add</span>
+                    )}
+                  </article>
+                ))}
+              </div>
+
+              {failedImportCount > 0 && (
+                <p className="muted">Unmatched lines are not saved. Add those cards manually using Single card search.</p>
+              )}
+            </div>
+          )}
+        </div>
       )}
     </section>
   );
