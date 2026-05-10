@@ -1045,6 +1045,7 @@ function DeckBuilderPage({
   const [cardSearch, setCardSearch] = useState('');
   const [entries, setEntries] = useState<Record<string, number>>({});
   const [saving, setSaving] = useState(false);
+  const [viewingDeck, setViewingDeck] = useState<DeckList | null>(null);
 
   const ownedByName = useMemo(() => {
     const map = new Map<string, number>();
@@ -1094,6 +1095,19 @@ function DeckBuilderPage({
       onNotice({ type: 'success', message: 'Deck list copied as plain text.' });
     } catch {
       onNotice({ type: 'error', message: 'Copy failed. Select the deck text and copy it manually.' });
+    }
+  }
+
+  async function copySavedDeckText(deck: DeckList) {
+    if (!deck.deckText) {
+      onNotice({ type: 'error', message: 'This saved deck does not have any deck text.' });
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(deck.deckText);
+      onNotice({ type: 'success', message: `${deck.deckName} copied as plain text.` });
+    } catch {
+      onNotice({ type: 'error', message: 'Copy failed. Open the deck list and copy it manually.' });
     }
   }
 
@@ -1215,13 +1229,84 @@ function DeckBuilderPage({
         {decks.length === 0 && <p className="muted">No saved decks yet.</p>}
         {decks.map((deck) => (
           <article className="saved-deck" key={deck.pageId || deck.id}>
-            <strong>{deck.deckName}</strong>
-            <span>{deck.cardCount} cards</span>
-            <button className="danger-button" onClick={() => deleteDeck(deck)}>Delete</button>
+            <div>
+              <strong>{deck.deckName}</strong>
+              <span>{deck.cardCount} cards</span>
+            </div>
+            <div className="saved-deck-actions">
+              <button className="secondary-button" onClick={() => setViewingDeck(deck)}>View</button>
+              <button className="secondary-button" onClick={() => copySavedDeckText(deck)}>Copy</button>
+              <button className="danger-button" onClick={() => deleteDeck(deck)}>Delete</button>
+            </div>
           </article>
         ))}
       </aside>
+
+      {viewingDeck && (
+        <ViewDeckModal
+          deck={viewingDeck}
+          onClose={() => setViewingDeck(null)}
+          onNotice={onNotice}
+        />
+      )}
     </section>
+  );
+}
+
+function ViewDeckModal({
+  deck,
+  onClose,
+  onNotice,
+}: {
+  deck: DeckList;
+  onClose: () => void;
+  onNotice: (notice: Notice | null) => void;
+}) {
+  async function copyViewedDeckText() {
+    if (!deck.deckText) {
+      onNotice({ type: 'error', message: 'This saved deck does not have any deck text.' });
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(deck.deckText);
+      onNotice({ type: 'success', message: `${deck.deckName} copied as plain text.` });
+    } catch {
+      onNotice({ type: 'error', message: 'Copy failed. Select the deck text and copy it manually.' });
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <article className="modal-card deck-view-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="section-heading compact">
+          <div>
+            <p className="eyebrow">Saved deck list</p>
+            <h2>{deck.deckName}</h2>
+          </div>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="Close deck list">×</button>
+        </div>
+
+        <div className="deck-view-meta">
+          <span>{deck.cardCount} / 100 cards</span>
+          {deck.updatedAt && <span>Updated {deck.updatedAt}</span>}
+        </div>
+
+        {deck.notes && (
+          <div className="deck-view-notes">
+            <strong>Notes</strong>
+            <p>{deck.notes}</p>
+          </div>
+        )}
+
+        <pre className="deck-view-pre">{deck.deckText || 'No deck text saved for this deck.'}</pre>
+
+        <div className="button-row wrap">
+          <button type="button" onClick={copyViewedDeckText}>Copy deck list</button>
+          <button type="button" className="secondary-button" onClick={onClose}>Close</button>
+        </div>
+      </article>
+    </div>
   );
 }
 

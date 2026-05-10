@@ -561,6 +561,77 @@ hr {
 
 .saved-deck {
   margin-top: 0.5rem;
+  align-items: flex-start;
+}
+
+.saved-deck > div:first-child {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.saved-deck strong {
+  overflow-wrap: anywhere;
+}
+
+.saved-deck-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.45rem;
+}
+
+.saved-deck-actions button {
+  padding: 0.58rem 0.75rem;
+  font-size: 0.84rem;
+}
+
+.deck-view-modal {
+  width: min(760px, 100%);
+}
+
+.deck-view-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-bottom: 1rem;
+}
+
+.deck-view-meta span {
+  border-radius: 999px;
+  background: rgba(208, 163, 79, 0.17);
+  padding: 0.38rem 0.62rem;
+  color: var(--ink);
+  font-size: 0.8rem;
+  font-weight: 900;
+}
+
+.deck-view-notes {
+  display: grid;
+  gap: 0.25rem;
+  margin-bottom: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  padding: 0.85rem;
+  background: #fffdf8;
+}
+
+.deck-view-notes p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.deck-view-pre {
+  min-height: 320px;
+  max-height: 55vh;
+  overflow: auto;
+  border-radius: 1.1rem;
+  padding: 1rem;
+  background: var(--panel);
+  color: #fff8ee;
+  white-space: pre-wrap;
+  line-height: 1.55;
 }
 
 
@@ -760,4 +831,14 @@ hr {
     justify-self: start;
     white-space: normal;
   }
+
+  .saved-deck {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .saved-deck-actions {
+    justify-content: flex-start;
+  }
 }
+
