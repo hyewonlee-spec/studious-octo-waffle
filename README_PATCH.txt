@@ -1,20 +1,15 @@
-Arcane Binder — Real Scanner Mechanics Patch
+Arcane Binder code cleanup patch
 
 Replace:
 /src/App.tsx
 /src/styles.css
+/package.json
+/api/cards.js
 
-Only replace /package.json if your current package.json does not already include:
-"tesseract.js": "^7.0.0"
+Purpose:
+- Removes the experimental camera scanner and tesseract.js dependency.
+- Keeps the app focused on Notion library access, manual add, scanner-app export import, and 100-card deck lists.
+- Keeps quantity logic clean: Total Quantity = Foil Quantity + Non-Foil Quantity.
+- Keeps saved deck viewing/copying.
 
-What changed:
-- Camera scan no longer treats the whole card as plain text.
-- It crops the MTG title-bar and upper-card zones.
-- It runs multiple OCR preprocessing variants.
-- It ranks card-name candidates.
-- It checks Scryfall exact, fuzzy, autocomplete, and regular search.
-- It automatically searches through multiple candidates until it finds a Scryfall match.
-
-Run:
-npm install
-npm run build
+No Notion database changes are required.
