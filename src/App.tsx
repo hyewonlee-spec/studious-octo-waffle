@@ -1,11 +1,12 @@
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from 'react';
 import type { DeckList, OwnedCard, ScryfallCard } from './types';
-import { getCardImage, labelLanguage, searchScryfallCards } from './lib/scryfall';
+import { getCardImage, getScryfallCardById, labelLanguage, searchScryfallCards } from './lib/scryfall';
 
 type Tab = 'library' | 'add' | 'decks' | 'settings';
 type AddMode = 'single' | 'import';
 type Notice = { type: 'success' | 'error' | 'info'; message: string };
 type ImportFoilMode = 'nonfoil' | 'foil';
+type ImportProfile = 'auto' | 'delver' | 'plain';
 
 type ParsedImportCard = {
   key: string;
@@ -14,7 +15,13 @@ type ParsedImportCard = {
   quantity: number;
   setCode?: string;
   collectorNumber?: string;
+  scryfallId?: string;
   foilHint?: boolean;
+  foilQuantity?: number;
+  nonfoilQuantity?: number;
+  language?: string;
+  noteDetails?: string[];
+  source?: 'delver' | 'text';
 };
 
 type MatchedImportCard = ParsedImportCard & {
@@ -128,7 +135,151 @@ function cleanImportedCardName(rawName: string) {
   return { name: working.replace(/\s+/g, ' ').trim(), setCode, collectorNumber, foilHint };
 }
 
-function parseCardListText(text: string): ParsedImportCard[] {
+
+function normaliseCsvHeader(header: string) {
+  return header.trim().toLowerCase().replace(/[\s_/-]+/g, '');
+}
+
+function readCsvValue(row: Record<string, string>, names: string[]) {
+  for (const name of names) {
+    const key = Object.keys(row).find((header) => normaliseCsvHeader(header) === normaliseCsvHeader(name));
+    if (key && row[key] !== undefined) return row[key].trim();
+  }
+  return '';
+}
+
+function parseCsvRows(text: string): Record<string, string>[] {
+  const rows: string[][] = [];
+  let field = '';
+  let row: string[] = [];
+  let inQuotes = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1];
+
+    if (char === '"') {
+      if (inQuotes && next === '"') {
+        field += '"';
+        index += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (char === ',' && !inQuotes) {
+      row.push(field);
+      field = '';
+      continue;
+    }
+
+    if ((char === '\n' || char === '\r') && !inQuotes) {
+      if (char === '\r' && next === '\n') index += 1;
+      row.push(field);
+      if (row.some((cell) => cell.trim() !== '')) rows.push(row);
+      row = [];
+      field = '';
+      continue;
+    }
+
+    field += char;
+  }
+
+  row.push(field);
+  if (row.some((cell) => cell.trim() !== '')) rows.push(row);
+  if (rows.length < 2) return [];
+
+  const headers = rows[0].map((cell) => cell.trim());
+  return rows.slice(1).map((cells) => {
+    const record: Record<string, string> = {};
+    headers.forEach((header, index) => {
+      record[header] = (cells[index] || '').trim();
+    });
+    return record;
+  });
+}
+
+function looksLikeDelverCsv(text: string) {
+  const firstLine = text.split(/\r?\n/, 1)[0] || '';
+  const headers = firstLine.split(',').map(normaliseCsvHeader);
+  return headers.includes('cardname') && (headers.includes('scryfallid') || headers.includes('listname') || headers.includes('foil'));
+}
+
+function parseQuantityValue(value: string) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+}
+
+function isFoilValue(value: string) {
+  return /foil|etched|true|yes|1/i.test(value || '');
+}
+
+function parseDelverCsvText(text: string): ParsedImportCard[] {
+  const records = parseCsvRows(text);
+  const byKey = new Map<string, ParsedImportCard>();
+
+  records.forEach((row, index) => {
+    const name = readCsvValue(row, ['Card Name', 'Name', 'Card']);
+    if (!name) return;
+
+    const scryfallId = readCsvValue(row, ['Scryfall Id', 'Scryfall ID', 'ScryfallId']);
+    const collectorNumber = readCsvValue(row, ['Number', 'Collector Number', 'Collector No']);
+    const quantity = parseQuantityValue(readCsvValue(row, ['Quantity', 'Qty', 'Count']));
+    const foilText = [readCsvValue(row, ['Foil']), readCsvValue(row, ['Foil/Etched']), readCsvValue(row, ['Finish'])].filter(Boolean).join(' ');
+    const foilHint = isFoilValue(foilText);
+    const language = readCsvValue(row, ['Language', 'Lang']);
+    const listName = readCsvValue(row, ['List Name', 'List']);
+    const creationDate = readCsvValue(row, ['Creation Date', 'Created At', 'Date']);
+    const rarity = readCsvValue(row, ['Rarity']);
+    const typeLine = readCsvValue(row, ['Type Line', 'Type']);
+    const manaCost = readCsvValue(row, ['Mana Cost']);
+    const manaValue = readCsvValue(row, ['Mana Value', 'CMC']);
+
+    const noteDetails = [
+      'Imported from Delver CSV',
+      listName ? `Delver list: ${listName}` : '',
+      creationDate ? `Delver created: ${creationDate}` : '',
+      rarity ? `Rarity: ${rarity}` : '',
+      typeLine ? `Type: ${typeLine}` : '',
+      manaCost ? `Mana cost: ${manaCost}` : '',
+      manaValue ? `Mana value: ${manaValue}` : '',
+    ].filter(Boolean);
+
+    const key = [scryfallId || name.toLowerCase(), collectorNumber, foilHint ? 'foil' : 'nonfoil', language || 'default'].join('|');
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.quantity += quantity;
+      existing.originalLine = `${existing.originalLine}; Delver row ${index + 2}`;
+      existing.foilQuantity = (existing.foilQuantity || 0) + (foilHint ? quantity : 0);
+      existing.nonfoilQuantity = (existing.nonfoilQuantity || 0) + (foilHint ? 0 : quantity);
+      return;
+    }
+
+    byKey.set(key, {
+      key: `${key}|${index}`,
+      originalLine: `Delver row ${index + 2}: ${quantity} ${name}${foilHint ? ' foil' : ''}`,
+      name,
+      quantity,
+      collectorNumber: collectorNumber || undefined,
+      scryfallId: scryfallId || undefined,
+      foilHint,
+      foilQuantity: foilHint ? quantity : 0,
+      nonfoilQuantity: foilHint ? 0 : quantity,
+      language: language || undefined,
+      noteDetails,
+      source: 'delver',
+    });
+  });
+
+  return Array.from(byKey.values()).slice(0, 500);
+}
+
+function parseCardListText(text: string, profile: ImportProfile = 'auto'): ParsedImportCard[] {
+  if ((profile === 'auto' && looksLikeDelverCsv(text)) || profile === 'delver') {
+    return parseDelverCsvText(text);
+  }
+
   const byKey = new Map<string, ParsedImportCard>();
 
   text.split(/\r?\n/).forEach((rawLine, index) => {
@@ -169,6 +320,7 @@ function parseCardListText(text: string): ParsedImportCard[] {
       setCode: cleaned.setCode,
       collectorNumber: cleaned.collectorNumber,
       foilHint: cleaned.foilHint,
+      source: 'text',
     });
   });
 
@@ -180,6 +332,10 @@ function escapeScryfallExactName(name: string) {
 }
 
 async function findScryfallCardForImport(item: ParsedImportCard) {
+  if (item.scryfallId) {
+    return getScryfallCardById(item.scryfallId);
+  }
+
   const exactName = `!"${escapeScryfallExactName(item.name)}"`;
   const queries = item.setCode ? [`${exactName} set:${item.setCode}`, `${item.name} set:${item.setCode}`, item.name] : [exactName, item.name];
   let lastError = 'No matching card found.';
@@ -201,8 +357,9 @@ async function findScryfallCardForImport(item: ParsedImportCard) {
   throw new Error(lastError);
 }
 
-function makeImportNote(existingNote: string, originalLine: string) {
-  const stamp = `Imported from scanner/export list: ${originalLine}`;
+function makeImportNote(existingNote: string, originalLine: string, details: string[] = []) {
+  const detailText = details.length ? `\n${details.join('\n')}` : '';
+  const stamp = `Imported from scanner/export list: ${originalLine}${detailText}`;
   return existingNote.trim() ? `${existingNote.trim()}\n${stamp}` : stamp;
 }
 
@@ -245,6 +402,7 @@ export default function App() {
   const [savingCard, setSavingCard] = useState(false);
 
   const [importText, setImportText] = useState('');
+  const [importProfile, setImportProfile] = useState<ImportProfile>('auto');
   const [importLanguage, setImportLanguage] = useState('English');
   const [importFoilMode, setImportFoilMode] = useState<ImportFoilMode>('nonfoil');
   const [matchedImports, setMatchedImports] = useState<MatchedImportCard[]>([]);
@@ -396,7 +554,7 @@ export default function App() {
   }
 
   async function matchImportList() {
-    const parsed = parseCardListText(importText);
+    const parsed = parseCardListText(importText, importProfile);
     if (!parsed.length) {
       showNotice('error', 'No card lines were found. Try lines like "1 Sol Ring" or "2x Counterspell".');
       return;
@@ -433,9 +591,10 @@ export default function App() {
     try {
       for (const item of items) {
         const card = item.matchedCard!;
+        const hasPreciseSplit = typeof item.foilQuantity === 'number' || typeof item.nonfoilQuantity === 'number';
         const shouldFoil = item.foilHint || importFoilMode === 'foil';
-        const foilQuantity = shouldFoil ? item.quantity : 0;
-        const nonfoilQuantity = shouldFoil ? 0 : item.quantity;
+        const foilQuantity = hasPreciseSplit ? Math.max(0, Number(item.foilQuantity || 0)) : shouldFoil ? item.quantity : 0;
+        const nonfoilQuantity = hasPreciseSplit ? Math.max(0, Number(item.nonfoilQuantity || 0)) : shouldFoil ? 0 : item.quantity;
         await saveOwnedCard({
           scryfallId: card.id,
           name: card.name,
@@ -446,8 +605,8 @@ export default function App() {
           totalQuantity: foilQuantity + nonfoilQuantity,
           foilQuantity,
           nonfoilQuantity,
-          language: importLanguage,
-          notes: makeImportNote('', item.originalLine),
+          language: item.language || importLanguage,
+          notes: makeImportNote('', item.originalLine, item.noteDetails),
           addedAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         });
@@ -639,13 +798,14 @@ export default function App() {
           ) : (
             <section className="sub-panel">
               <h3>Import from third-party scanner app</h3>
-              <p className="muted">Paste or upload a ManaBox/Delver Lens/plain text export. The app will match card names through Scryfall before saving to Notion.</p>
+              <p className="muted compact-copy">Upload a Delver Lens CSV or paste a clipboard/plain text list. Delver CSV imports use Scryfall ID, foil status, list name, creation date and collector number when available.</p>
               <div className="filter-grid">
+                <label>Import profile<select value={importProfile} onChange={(event) => setImportProfile(event.target.value as ImportProfile)}><option value="auto">Auto-detect</option><option value="delver">Delver CSV</option><option value="plain">Plain text / clipboard</option></select></label>
                 <label>Default language<select value={importLanguage} onChange={(event) => setImportLanguage(event.target.value)}>{languageOptions.map((language) => <option key={language} value={language}>{language}</option>)}</select></label>
                 <label>Default quantity type<select value={importFoilMode} onChange={(event) => setImportFoilMode(event.target.value as ImportFoilMode)}><option value="nonfoil">Non-foil</option><option value="foil">Foil</option></select></label>
-                <label>Upload text/CSV<input type="file" accept=".txt,.csv" onChange={handleImportFile} /></label>
+                <label>Upload Delver CSV/text<input type="file" accept=".txt,.csv" onChange={handleImportFile} /></label>
               </div>
-              <textarea className="import-box" value={importText} onChange={(event) => setImportText(event.target.value)} placeholder={'1 Sol Ring\n2x Counterspell\n1 Command Tower (LTC) 350 foil'} />
+              <textarea className="import-box" value={importText} onChange={(event) => setImportText(event.target.value)} placeholder={'Delver CSV: upload the exported .csv file\n\nPlain text examples:\n1 Sol Ring\n2x Counterspell\n1 Command Tower (LTC) 350 foil'} />
               <div className="button-row"><button onClick={matchImportList} disabled={matchingImports}>{matchingImports ? 'Matching…' : 'Parse and match'}</button><button className="secondary-button" onClick={() => { setImportText(''); setMatchedImports([]); }}>Clear</button></div>
               {matchedImports.length > 0 && <ImportPreview items={matchedImports} saving={savingImports} onSave={saveMatchedImports} />}
             </section>
@@ -752,7 +912,7 @@ function ImportPreview({ items, saving, onSave }: { items: MatchedImportCard[]; 
   return (
     <div className="import-preview">
       <div className="section-heading"><div><p className="eyebrow">Import preview</p><h3>{matchedCount} / {items.length} matched</h3></div><button onClick={onSave} disabled={saving || matchedCount === 0}>{saving ? 'Saving…' : 'Save matched cards'}</button></div>
-      <div className="compact-list">{items.map((item) => <div className={`compact-row compact-row--static import-status--${item.status}`} key={item.key}><span><strong>{item.quantity} {item.name}</strong><small>{item.status === 'matched' && item.matchedCard ? `${item.matchedCard.name} · ${item.matchedCard.set.toUpperCase()} #${item.matchedCard.collector_number}` : item.error || item.status}</small></span><span className="status-pill">{item.status}</span></div>)}</div>
+      <div className="compact-list">{items.map((item) => <div className={`compact-row compact-row--static import-status--${item.status}`} key={item.key}><span><strong>{item.quantity} {item.name}</strong><small>{item.status === 'matched' && item.matchedCard ? `${item.matchedCard.name} · ${item.matchedCard.set.toUpperCase()} #${item.matchedCard.collector_number}${item.scryfallId ? ' · Scryfall ID matched' : ''}${item.foilQuantity ? ` · foil ${item.foilQuantity}` : ''}${item.nonfoilQuantity ? ` · non-foil ${item.nonfoilQuantity}` : ''}` : item.error || item.status}</small></span><span className="status-pill">{item.status}</span></div>)}</div>
     </div>
   );
 }

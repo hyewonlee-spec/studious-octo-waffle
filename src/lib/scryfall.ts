@@ -45,3 +45,17 @@ export async function searchScryfallCards(query: string): Promise<ScryfallCard[]
 
   return data.data || [];
 }
+
+export async function getScryfallCardById(id: string): Promise<ScryfallCard> {
+  const trimmed = id.trim();
+  if (!trimmed) throw new Error('Missing Scryfall ID.');
+
+  const response = await fetch(`https://api.scryfall.com/cards/${encodeURIComponent(trimmed)}`);
+  const data = (await response.json()) as ScryfallCard & { details?: string };
+
+  if (!response.ok) {
+    throw new Error(data.details || 'Scryfall card lookup failed.');
+  }
+
+  return data;
+}

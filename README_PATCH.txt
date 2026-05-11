@@ -1,15 +1,21 @@
-Arcane Binder code cleanup patch
+Arcane Binder — Delver CSV Import + Compact Visual Patch
 
-Replace:
+Replace these files:
 /src/App.tsx
 /src/styles.css
-/package.json
-/api/cards.js
+/src/lib/scryfall.ts
+/tsconfig.json
 
-Purpose:
-- Removes the experimental camera scanner and tesseract.js dependency.
-- Keeps the app focused on Notion library access, manual add, scanner-app export import, and 100-card deck lists.
-- Keeps quantity logic clean: Total Quantity = Foil Quantity + Non-Foil Quantity.
-- Keeps saved deck viewing/copying.
+What changed:
+- Tightened vertical spacing across the app.
+- Reduced hero height, panel padding, form gaps, card/list spacing and textarea height.
+- Added Delver CSV auto-detection.
+- Added Delver CSV parsing for the uploaded sample columns:
+  Artist, Mana Cost, Creation Date, Foil/Etched, Foil, Mana Value, Card Name, Number, Rules Text, Rarity, Type Line, Creature Power, Creature Toughness, List Name, Scryfall Id
+- Uses Scryfall ID from Delver CSV to retrieve the exact card/printing.
+- Preserves Delver metadata in Notes where possible: list name, creation date, rarity, type, mana cost and mana value.
+- Groups duplicate CSV rows into quantity counts.
+- Keeps foil/non-foil split based on Delver foil columns.
 
-No Notion database changes are required.
+Build check:
+npm run build completed successfully.
